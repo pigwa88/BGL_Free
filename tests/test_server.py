@@ -209,6 +209,120 @@ class ServerTestCase(unittest.TestCase):
         self.assertTrue(data["ok"])
         call(self.url, "/sessions/przerwij", "DELETE")
 
+    # ---------------------------------------------------------- widoki logu
+
+    def _many_lines(self, session: str = "widoki") -> dict:
+        command = (
+            'for /l %i in (1,1,300) do @echo linia-%i'
+            if IS_WINDOWS
+            else "for i in $(seq 1 300); do echo linia-$i; done"
+        )
+        _, data = call(self.url, "/run", "POST",
+                       {"command": command, "session": session, "view": "quiet"})
+        return data
+
+    def test_quiet_view_returns_no_output(self) -> None:
+        data = self._many_lines("cichy")
+        self.assertEqual(data["output"], "")
+        self.assertEqual(data["lines_total"], 300)
+        self.assertEqual(data["exit_code"], 0)
+        call(self.url, "/sessions/cichy", "DELETE")
+
+    def test_tail_view(self) -> None:
+        command = (
+            'for /l %i in (1,1,300) do @echo linia-%i'
+            if IS_WINDOWS
+            else "for i in $(seq 1 300); do echo linia-$i; done"
+        )
+        _, data = call(self.url, "/run", "POST",
+                       {"command": command, "session": "ogon", "view": "tail", "lines": 3})
+        self.assertEqual(data["output"].split("\n")[-1], "linia-300")
+        self.assertEqual(data["lines_shown"], 3)
+        call(self.url, "/sessions/ogon", "DELETE")
+
+    def test_grep_view(self) -> None:
+        command = (
+            'for /l %i in (1,1,300) do @echo linia-%i'
+            if IS_WINDOWS
+            else "for i in $(seq 1 300); do echo linia-$i; done"
+        )
+        _, data = call(self.url, "/run", "POST",
+                       {"command": command, "session": "szukaj", "view": "grep",
+                        "pattern": "linia-42$"})
+        self.assertEqual(data["matches"], 1)
+        self.assertIn("linia-42", data["output"])
+        call(self.url, "/sessions/szukaj", "DELETE")
+
+    def test_grep_with_bad_pattern_is_400(self) -> None:
+        status, data = call(self.url, "/run", "POST",
+                            {"command": "echo x", "view": "grep", "pattern": "[zle"})
+        self.assertEqual(status, 400)
+
+    def test_errors_view_extracts_build_failure(self) -> None:
+        script = (
+            'echo e: file:///app/Main.kt:42:17 Unresolved reference: bindig'
+            if IS_WINDOWS
+            else "echo 'e: file:///app/Main.kt:42:17 Unresolved reference: bindig'"
+        )
+        _, data = call(self.url, "/run", "POST",
+                       {"command": script, "session": "bledy", "view": "errors"})
+        self.assertEqual(data["findings"][0]["file"], "/app/Main.kt")
+        self.assertEqual(data["findings"][0]["line"], 42)
+        self.assertEqual(data["verdict"], "failed")
+        call(self.url, "/sessions/bledy", "DELETE")
+
+    def test_auto_view_shows_errors_only_on_failure(self) -> None:
+        failing = "cmd /c exit 7" if IS_WINDOWS else "(exit 7)"
+        _, data = call(self.url, "/run", "POST",
+                       {"command": failing, "session": "auto", "view": "auto"})
+        self.assertEqual(data["view"], "errors")
+        self.assertTrue(data.get("view_auto"))
+
+        _, data = call(self.url, "/run", "POST",
+                       {"command": "echo ok", "session": "auto", "view": "auto"})
+        self.assertEqual(data["view"], "tail")
+        self.assertIn("ok", data["output"])
+        call(self.url, "/sessions/auto", "DELETE")
+
+    def test_logs_endpoint_queries_previous_command(self) -> None:
+        command = (
+            'for /l %i in (1,1,300) do @echo linia-%i'
+            if IS_WINDOWS
+            else "for i in $(seq 1 300); do echo linia-$i; done"
+        )
+        _, run_data = call(self.url, "/run", "POST",
+                           {"command": command, "session": "archiwum", "view": "quiet"})
+        seq = run_data["seq"]
+
+        status, data = call(self.url, "/logs", "POST",
+                            {"session": "archiwum", "seq": seq, "view": "grep",
+                             "pattern": "linia-99$"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["matches"], 1)
+
+        status, data = call(self.url, "/logs", "POST",
+                            {"session": "archiwum", "seq": seq, "view": "around",
+                             "line": 99, "context": 1})
+        self.assertEqual(status, 200)
+        self.assertIn("linia-99", data["output"])
+        self.assertEqual(data["lines_shown"], 3)
+        call(self.url, "/sessions/archiwum", "DELETE")
+
+    def test_logs_endpoint_defaults_to_last_command(self) -> None:
+        call(self.url, "/run", "POST", {"command": "echo ostatnie", "session": "ostatni"})
+        status, data = call(self.url, "/logs", "POST",
+                            {"session": "ostatni", "view": "full"})
+        self.assertEqual(status, 200)
+        self.assertIn("ostatnie", data["output"])
+        call(self.url, "/sessions/ostatni", "DELETE")
+
+    def test_logs_endpoint_unknown_seq_is_404(self) -> None:
+        call(self.url, "/run", "POST", {"command": "echo x", "session": "brakloga"})
+        status, data = call(self.url, "/logs", "POST", {"session": "brakloga", "seq": 999})
+        self.assertEqual(status, 404)
+        self.assertIn("hint", data)
+        call(self.url, "/sessions/brakloga", "DELETE")
+
     def test_unknown_path_is_404(self) -> None:
         status, _ = call(self.url, "/nie-ma-takiej")
         self.assertEqual(status, 404)

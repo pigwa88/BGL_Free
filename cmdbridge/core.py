@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import __version__
 from .audit import AuditLog
+from .outputview import VIEWS, ViewError, render
 from .policy import Policy
 from .session import (
     DEFAULT_TIMEOUT,
@@ -137,6 +138,7 @@ class Bridge:
                 "timeout": self.default_timeout,
                 "max_output": self.max_output,
             },
+            "views": ("auto",) + VIEWS,
         }
 
     def instructions(self) -> str:
@@ -180,6 +182,47 @@ class Bridge:
         self.audit.write("session_kill", session=name)
         return 200, {"ok": True, "message": f"Sesja {name!r} zamknięta"}
 
+    # ------------------------------------------------------------- widoki logu
+
+    def _view_spec(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalizuje parametry widoku wyjścia z żądania."""
+        spec = {
+            "view": str(body.get("view") or "full").lower(),
+            "pattern": body.get("pattern"),
+            "context": body.get("context"),
+            "lines": body.get("lines"),
+            "profile": body.get("profile"),
+            "max_findings": body.get("max_findings"),
+            "line": body.get("line"),
+            "raw": body.get("raw"),
+            "case_sensitive": body.get("case_sensitive"),
+            "invert": body.get("invert"),
+            "max_chars": body.get("max_chars", body.get("max_output", self.max_output)),
+        }
+        return spec
+
+    @staticmethod
+    def _resolve_auto(spec: Dict[str, Any], failed: bool) -> Dict[str, Any]:
+        """Widok ``auto``: przy porażce pokaż błędy, przy sukcesie sam ogon logu."""
+        if spec.get("view") != "auto":
+            return spec
+        spec = dict(spec)
+        spec["view"] = "errors" if failed else "tail"
+        if spec["view"] == "tail" and not spec.get("lines"):
+            spec["lines"] = 20
+        spec["view_auto"] = True
+        return spec
+
+    def _render(self, source: Dict[str, Any], spec: Dict[str, Any]) -> Response:
+        auto = spec.pop("view_auto", False)
+        try:
+            view = render(source, spec)
+        except ViewError as exc:
+            return self._error(400, str(exc))
+        if auto:
+            view["view_auto"] = True
+        return 200, view
+
     def run(self, body: Dict[str, Any]) -> Response:
         command = body.get("command")
         if not isinstance(command, str):
@@ -213,17 +256,22 @@ class Bridge:
         except SessionError as exc:
             return self._error(500, str(exc), exc.hint)
 
-        limit = body.get("max_output")
-        try:
-            limit = int(limit) if limit is not None else self.max_output
-        except (TypeError, ValueError):
-            limit = self.max_output
-        output, truncated = truncate(result.output, limit)
+        spec = self._resolve_auto(
+            self._view_spec(body), failed=bool(result.exit_code) or result.timed_out
+        )
+        status, view = self._render(result.source, spec)
+        if status != 200:
+            return status, view
 
         payload = result.to_dict()
-        payload["output"] = output
-        payload["truncated"] = truncated
+        payload["output"] = view.pop("text", "")
+        payload.update(view)
         payload["ok"] = True
+        if payload.get("truncated") and spec.get("view") == "full":
+            payload["hint"] = (
+                "Wyjście ucięte. Zamiast czytać całość użyj view=errors (błędy), "
+                "view=grep z 'pattern' albo view=around z numerem linii."
+            )
         if result.timed_out:
             payload["hint"] = (
                 "Przekroczono limit czasu. Sesja odzyskana - zwiększ 'timeout'."
@@ -240,6 +288,43 @@ class Bridge:
             timed_out=result.timed_out,
         )
         return 200, payload
+
+    def logs(self, body: Dict[str, Any]) -> Response:
+        """Odpytuje log wcześniejszego polecenia - bez ponownego uruchamiania go.
+
+        To jest sposób na drążenie dużego buildu: raz uruchom, potem pytaj o
+        kolejne fragmenty (grep, around, tail) bez marnowania czasu i kontekstu.
+        """
+        name = body.get("session") or "main"
+        try:
+            session = self.manager.get(name, create=False)
+        except SessionError as exc:
+            return self._error(404, str(exc), exc.hint)
+
+        seq = body.get("seq")
+        if seq in (None, "", "last"):
+            seq = session.seq
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            return self._error(400, "Pole 'seq' musi być liczbą (numer polecenia)")
+        if seq < 1:
+            return self._error(404, f"Sesja {name!r} nie wykonała jeszcze żadnego polecenia")
+
+        path = session.log_path_for(seq)
+        if not path:
+            return self._error(
+                404,
+                f"Brak logu polecenia {seq} w sesji {name!r}",
+                "Sprawdź 'seq' w odpowiedzi /run (most mógł działać z --no-logs)",
+            )
+
+        status, view = self._render({"path": str(path)}, self._view_spec(body))
+        if status != 200:
+            return status, view
+        view.update({"ok": True, "session": name, "seq": seq, "log_file": str(path)})
+        view["output"] = view.pop("text", "")
+        return 200, view
 
     def stdin(self, name: str, body: Dict[str, Any]) -> Response:
         data = body.get("data")
@@ -302,6 +387,7 @@ class Bridge:
             "stdin": lambda: self.stdin(session, body),
             "output": lambda: self.output(session, body.get("since", 0)),
             "interrupt": lambda: self.interrupt(session),
+            "logs": lambda: self.logs(body),
         }
         handler = handlers.get(op)
         if not handler:

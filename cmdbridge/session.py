@@ -13,11 +13,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .outputview import HEADER_END as LOG_HEADER_END
+from .outputview import HEADER_SENTINEL as LOG_HEADER_SENTINEL
 from .procutil import interrupt_children
 from .shell import MARKER_PREFIX, ShellSpec, resolve_shell
 
 DEFAULT_TIMEOUT = 60.0
-DEFAULT_MAX_BUFFER = 4_000_000  # znaków trzymanych w pamięci na sesję
+# Pełne wyjście trafia na dysk, więc w pamięci wystarczy ruchome okno na podgląd
+# na żywo (/output) i na odnalezienie znacznika końca polecenia.
+DEFAULT_MAX_BUFFER = 512_000
 INTERRUPT_GRACE = 3.0           # ile czekać na odzyskanie sesji po przerwaniu
 
 
@@ -63,25 +67,44 @@ class SessionDirty(SessionError):
 
 @dataclass
 class RunResult:
-    """Wynik pojedynczego polecenia."""
+    """Wynik polecenia.
+
+    Nie przechowuje całego wyjścia w pamięci: pełny tekst leży w pliku logu
+    (``log_file``), a warstwa wyżej decyduje, jaki *widok* tego logu dostanie
+    model AI. ``source_text`` używane jest tylko wtedy, gdy logi na dysk są
+    wyłączone (``--no-logs``).
+    """
 
     session: str
     seq: int
     command: str
-    output: str
     exit_code: Optional[int]
     cwd: str
     duration: float
     timed_out: bool = False
     recovered: bool = False
     log_file: Optional[str] = None
+    source_text: Optional[str] = None
+
+    @property
+    def source(self) -> dict:
+        """Źródło dla silnika widoków: plik logu albo tekst z pamięci."""
+        if self.log_file:
+            return {"path": self.log_file}
+        return {"text": self.source_text or ""}
+
+    @property
+    def output(self) -> str:
+        """Pełne wyjście jako tekst (wygodne w kodzie i testach)."""
+        from .outputview import render
+
+        return render(self.source, {"view": "full", "max_chars": 2_000_000})["text"]
 
     def to_dict(self) -> dict:
         return {
             "session": self.session,
             "seq": self.seq,
             "command": self.command,
-            "output": self.output,
             "exit_code": self.exit_code,
             "cwd": self.cwd,
             "duration": round(self.duration, 3),
@@ -133,6 +156,7 @@ class ShellSession:
         self._alive = False
         self._exit_code: Optional[int] = None
         self._pending_cr = ""
+        self._log_handle = None      # otwarty plik logu bieżącego polecenia
 
     # ------------------------------------------------------------------ start
 
@@ -218,6 +242,11 @@ class ShellSession:
             text = text.replace("\r\n", "\n")
         with self._cv:
             self._buf += text
+            if self._log_handle is not None:
+                try:
+                    self._log_handle.write(text)
+                except (OSError, ValueError):
+                    self._log_handle = None
             self._trim_locked()
             self._cv.notify_all()
 
@@ -225,8 +254,15 @@ class ShellSession:
         overflow = len(self._buf) - self.max_buffer
         if overflow <= 0:
             return
-        # Nigdy nie przycinamy fragmentu należącego do trwającego polecenia.
-        keep_from = max(0, min(overflow, self._protect_from - self._dropped))
+        if self._log_handle is not None:
+            # Pełne wyjście idzie na dysk, więc pamięć może być zwykłym oknem.
+            keep_from = overflow
+        else:
+            # Bez logów musimy zachować fragment trwającego polecenia, ale nie
+            # kosztem nieograniczonego wzrostu pamięci - stąd twardy limit.
+            keep_from = max(0, min(overflow, self._protect_from - self._dropped))
+            if len(self._buf) > 2 * self.max_buffer:
+                keep_from = overflow
         if keep_from <= 0:
             return
         self._buf = self._buf[keep_from:]
@@ -295,64 +331,82 @@ class ShellSession:
             + self.spec.line_ending
         )
 
+        seq = 0 if internal else self.seq + 1
+        handle, log_path = self._open_log(seq, command) if not internal else (None, None)
+
+        # Otwarcie logu i wyznaczenie startu muszą nastąpić razem, żeby plik
+        # obejmował dokładnie wyjście tego jednego polecenia.
         with self._cv:
             start = self._dropped + len(self._buf)
             self._protect_from = start
+            self._log_handle = handle
 
         started = time.time()
-        self._write(payload)
+        try:
+            self._write(payload)
 
-        found = self._wait_for_marker(marker, start, timeout)
-        timed_out = found is None
-        recovered = False
+            found = self._wait_for_marker(marker, start, timeout)
+            timed_out = found is None
+            recovered = False
 
-        if timed_out:
-            # Próba odzyskania sesji: wysyłamy Ctrl+Break / SIGINT i czekamy chwilę.
-            self.interrupt()
-            found = self._wait_for_marker(marker, start, INTERRUPT_GRACE)
-            recovered = found is not None
-            if not recovered:
-                self.dirty = True
+            if timed_out:
+                # Próba odzyskania sesji: przerywamy procesy potomne i czekamy chwilę.
+                self.interrupt()
+                found = self._wait_for_marker(marker, start, INTERRUPT_GRACE)
+                recovered = found is not None
+                if not recovered:
+                    self.dirty = True
 
-        duration = time.time() - started
+            duration = time.time() - started
 
-        if found is None:
+            if found is None:
+                exit_code, cwd = None, self.cwd
+                tail_from = None
+            else:
+                marker_at, line_end = found
+                with self._cv:
+                    base = self._dropped
+                    line = self._buf[marker_at - base:line_end - base]
+                    self._protect_from = line_end + 1
+                exit_code, cwd = self._parse_marker(line, marker)
+                self.cwd = cwd
+                tail_from = marker_at
+        finally:
             with self._cv:
-                output = self._buf[max(0, start - self._dropped):]
-            exit_code, cwd = None, self.cwd
-        else:
-            marker_at, line_end = found
+                self._log_handle = None
+            if handle:
+                try:
+                    handle.flush()
+                    handle.close()
+                except OSError:
+                    pass
+
+        source_text: Optional[str] = None
+        if handle is None:
+            # Tryb bez logów na dysku: wyjście bierzemy z bufora w pamięci.
             with self._cv:
                 base = self._dropped
-                output = self._buf[max(0, start - base):marker_at - base]
-                line = self._buf[marker_at - base:line_end - base]
-                self._protect_from = line_end + 1
-            exit_code, cwd = self._parse_marker(line, marker)
-            self.cwd = cwd
-
-        # Znaczniki zaległych poleceń (np. po timeoucie) nie trafiają do wyniku.
-        output, _ = strip_markers(output)
-        if output.endswith("\n"):
-            output = output[:-1]
+                end = tail_from if tail_from is not None else base + len(self._buf)
+                source_text = self._buf[max(0, start - base):max(0, end - base)]
+            source_text, _ = strip_markers(source_text)
 
         self.last_used = time.time()
         if internal:
-            return RunResult(self.id, 0, command, "", exit_code, self.cwd, duration)
+            return RunResult(self.id, 0, command, exit_code, self.cwd, duration)
 
-        self.seq += 1
-        result = RunResult(
+        self.seq = seq
+        return RunResult(
             session=self.id,
-            seq=self.seq,
+            seq=seq,
             command=command,
-            output=output,
             exit_code=exit_code,
             cwd=self.cwd,
             duration=duration,
             timed_out=timed_out,
             recovered=recovered,
+            log_file=str(log_path) if log_path else None,
+            source_text=source_text,
         )
-        result.log_file = self._write_log(result)
-        return result
 
     def _parse_marker(self, line: str, marker: str) -> tuple[Optional[int], str]:
         parts = line.strip().split(" ", 2)
@@ -486,23 +540,36 @@ class ShellSession:
 
     # ---------------------------------------------------------------- logowanie
 
-    def _write_log(self, result: RunResult) -> Optional[str]:
+    def log_path_for(self, seq: int) -> Optional[Path]:
+        """Ścieżka logu polecenia o numerze ``seq`` (jeśli istnieje)."""
         if not self.log_dir:
             return None
-        path = self.log_dir / f"{result.seq:05d}.log"
-        header = (
-            f"# session : {self.id}\n"
-            f"# command : {result.command}\n"
-            f"# cwd     : {result.cwd}\n"
-            f"# exit    : {result.exit_code}\n"
-            f"# seconds : {result.duration:.3f}\n"
-            f"{'-' * 60}\n"
-        )
+        path = self.log_dir / f"{seq:05d}.log"
+        return path if path.exists() else None
+
+    def _open_log(self, seq: int, command: str):
+        """Otwiera plik logu polecenia i zapisuje nagłówek.
+
+        Wyjście dopisywane jest na bieżąco przez wątek czytający, więc pamięć
+        procesu nie rośnie nawet przy buildzie generującym setki megabajtów.
+        """
+        if not self.log_dir:
+            return None, None
+        path = self.log_dir / f"{seq:05d}.log"
         try:
-            path.write_text(header + result.output + "\n", encoding="utf-8", errors="replace")
+            handle = path.open("w", encoding="utf-8", errors="replace", newline="")
+            handle.write(
+                f"{LOG_HEADER_SENTINEL}\n"
+                f"# session : {self.id}\n"
+                f"# seq     : {seq}\n"
+                f"# command : {command}\n"
+                f"# cwd     : {self.cwd}\n"
+                f"# started : {time.strftime('%Y-%m-%dT%H:%M:%S')}\n"
+                f"{LOG_HEADER_END}\n"
+            )
         except OSError:
-            return None
-        return str(path)
+            return None, None
+        return handle, path
 
 
 class SessionManager:

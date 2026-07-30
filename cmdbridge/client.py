@@ -82,6 +82,9 @@ def main(argv: Optional[list] = None) -> int:
 
     run = sub.add_parser("run", parents=[common], help="Wykonaj polecenie")
     run.add_argument("command", nargs="+")
+    run.add_argument("--view", help="Widok wyjścia: auto|full|tail|errors|grep|summary|quiet")
+    run.add_argument("--pattern", help="Wzorzec dla view=grep")
+    run.add_argument("--lines", type=int, help="Liczba linii dla tail/head/grep")
     sub.add_parser("status", parents=[common], help="Stan mostu")
     sub.add_parser("sessions", parents=[common], help="Lista sesji")
     sub.add_parser("new", parents=[common], help="Nowa sesja CMD")
@@ -91,6 +94,14 @@ def main(argv: Optional[list] = None) -> int:
                    help="Przerwij bieżące polecenie (Ctrl+Break)")
     out = sub.add_parser("output", parents=[common], help="Nowe wyjście sesji")
     out.add_argument("--since", type=int, default=0)
+    logs = sub.add_parser("logs", parents=[common],
+                          help="Widok logu wcześniejszego polecenia")
+    logs.add_argument("--seq", default="last", help="Numer polecenia (domyślnie ostatnie)")
+    logs.add_argument("--view", default="errors", help="full|tail|head|grep|around|errors|summary")
+    logs.add_argument("--pattern", help="Wzorzec dla view=grep")
+    logs.add_argument("--line", type=int, help="Numer linii dla view=around")
+    logs.add_argument("--context", type=int, help="Liczba linii otoczenia")
+    logs.add_argument("--lines", type=int, help="Liczba linii dla tail/head/grep")
     stdin_cmd = sub.add_parser("stdin", parents=[common],
                                help="Wyślij tekst na wejście powłoki")
     stdin_cmd.add_argument("data")
@@ -105,7 +116,16 @@ def main(argv: Optional[list] = None) -> int:
         body: Dict[str, Any] = {"command": " ".join(args.command), "session": args.session}
         if args.timeout:
             body["timeout"] = args.timeout
+        for field in ("view", "pattern", "lines"):
+            if getattr(args, field, None) is not None:
+                body[field] = getattr(args, field)
         status, data = request(url, token, "/run", "POST", body)
+    elif args.op == "logs":
+        body = {"session": args.session, "seq": args.seq, "view": args.view}
+        for field in ("pattern", "line", "context", "lines"):
+            if getattr(args, field, None) is not None:
+                body[field] = getattr(args, field)
+        status, data = request(url, token, "/logs", "POST", body)
     elif args.op == "status":
         status, data = request(url, token, "/health")
     elif args.op == "sessions":
@@ -129,11 +149,14 @@ def main(argv: Optional[list] = None) -> int:
     if args.raw or not isinstance(data, dict):
         print(json.dumps(data, ensure_ascii=False, indent=2)
               if isinstance(data, (dict, list)) else data)
-    elif args.op == "run" and data.get("ok"):
+    elif args.op in ("run", "logs") and data.get("ok"):
         if data.get("output"):
             print(data["output"])
-        print(f"[exit={data.get('exit_code')} cwd={data.get('cwd')} "
-              f"czas={data.get('duration')}s]", file=sys.stderr)
+        if args.op == "run":
+            print(f"[exit={data.get('exit_code')} cwd={data.get('cwd')} "
+                  f"czas={data.get('duration')}s widok={data.get('view')} "
+                  f"linii={data.get('lines_total')} log={data.get('log_file')}]",
+                  file=sys.stderr)
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
 

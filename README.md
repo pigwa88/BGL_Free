@@ -16,6 +16,12 @@ polecenie do mostu, most wykonuje je w **trwałej sesji CMD** i zwraca pełne wy
 - **Nowy CMD na żądanie** — `POST /sessions` (nowa sesja) lub `POST /sessions/<id>/restart`
   (świeża powłoka, gdy poprzednia się zawiesiła).
 - **Prawdziwe kody wyjścia** (`%ERRORLEVEL%`) i scalone stdout + stderr w kolejności.
+- **Filtrowanie wyjścia po stronie mostu** — zamiast całego logu AI dostaje same
+  błędy, wynik `grep` albo ogon logu. Z 40 000 linii buildu Gradle robi się
+  kilkanaście linii konkretu (patrz [Widoki wyjścia](#widoki-wyjścia)).
+- **Stała pamięć** — pełny log strumieniowany jest na dysk w trakcie wykonania,
+  w pamięci zostaje tylko ruchome okno; build sypiący setkami megabajtów nie
+  rozsadza procesu.
 - **Programy interaktywne** — pisanie na stdin, przerywanie (`interrupt`), podgląd
   wyjścia w trakcie działania (`/output?since=`).
 - **Dwa kanały komunikacji**: lokalne API HTTP oraz katalog plików (`mailbox`) dla
@@ -68,13 +74,51 @@ Jeśli model nie może wykonywać żądań HTTP, uruchom most z `--mailbox` i ws
 katalog: żądanie to plik JSON w `inbox/`, odpowiedź pojawia się pod tą samą nazwą
 w `outbox/`.
 
+## Widoki wyjścia
+
+Pole `view` w żądaniu decyduje, co most wytnie z logu **po swojej stronie** —
+zanim cokolwiek trafi do modelu:
+
+| `view` | Zwraca | Kiedy |
+|---|---|---|
+| `auto` | błędy przy porażce, ogon przy sukcesie | domyślny wybór dla buildów |
+| `errors` | rozpoznane błędy z plikiem, linią i numerem linii w logu | `exit_code != 0` |
+| `summary` | sam werdykt i liczniki, bez tekstu | „przeszło czy nie" |
+| `grep` | linie pasujące do `pattern` (+ `context`) | szukanie konkretu |
+| `around` | okolice wskazanej linii logu | kontekst wokół błędu |
+| `tail` / `head` | ostatnie / pierwsze `lines` linii | podsumowania |
+| `quiet` | nic prócz statystyk | liczy się tylko kod wyjścia |
+| `full` | całość przyciętą do `max_chars` | krótkie polecenia |
+
+Ekstraktory rozpoznają komunikaty Gradle, Kotlina, javac, AAPT2, Androida
+(manifest merger, duplicate class, dex), Pythona, npm/TypeScript i MSBuild.
+Przykład — z buildu, który wypluł 40 014 linii (1,4 MB na dysku), model dostaje
+1,7 KB:
+
+```
+BUILD FAILED in 1m 12s
+[error] Task :app:compileDebugKotlin FAILED  (log:20001)
+[error] C:/Projekt/app/src/main/java/MainActivity.kt:42 Unresolved reference: bindig  (log:20003)
+[error] * What went wrong:  (log:40007)
+    Execution failed for task ':app:compileDebugKotlin'.
+```
+
+Log zostaje na dysku, więc można go drążyć bez powtarzania polecenia:
+
+```json
+POST /logs
+{"session": "build", "view": "around", "line": 20003, "context": 5}
+{"session": "build", "view": "grep", "pattern": "Caused by", "context": 3}
+```
+
 ## API HTTP (skrót)
 
 | Metoda i ścieżka | Opis |
 |---|---|
 | `GET /health` | stan mostu, lista sesji (bez tokenu) |
 | `GET /instructions` | instrukcja dla AI |
-| `POST /run` | `{"command": "dir", "session": "main", "timeout": 60}` |
+| `POST /run` | `{"command": "dir", "session": "main", "timeout": 60, "view": "auto"}` |
+| `POST /logs` | widok logu wcześniejszego polecenia: `{"session": "build", "view": "grep", "pattern": "..."}` |
 | `GET /sessions` | lista sesji |
 | `POST /sessions` | nowa sesja: `{"session": "build", "cwd": "C:\\Projekt"}` |
 | `POST /sessions/<id>/restart` | nowy proces CMD dla sesji |
@@ -101,7 +145,8 @@ Przykładowa odpowiedź `POST /run`:
 ```bat
 python -m cmdbridge.client status
 python -m cmdbridge.client run "dir"
-python -m cmdbridge.client run --session build "cd .. && dir"
+python -m cmdbridge.client run --session build --view auto "gradlew.bat assembleDebug"
+python -m cmdbridge.client logs --session build --view grep --pattern "Caused by"
 python -m cmdbridge.client restart --session main
 ```
 
@@ -135,14 +180,26 @@ cmdbridge/
   server.py     API HTTP (http.server)
   mailbox.py    tryb wymiany plików JSON
   session.py    trwałe sesje powłoki, protokół znacznika, timeouty
+  outputview.py silnik widoków (full/tail/grep/around/errors...) - czyta strumieniowo
+  extractors.py rozpoznawanie błędów: Gradle, Kotlin, javac, AAPT2, Python, npm, MSBuild
   shell.py      definicje powłok (cmd.exe, PowerShell, sh/bash)
   procutil.py   drzewo procesów potomnych (przerywanie bez zabijania powłoki)
   policy.py     reguły bezpieczeństwa
   audit.py      dziennik JSONL
   client.py     klient CLI
 AI_INSTRUCTIONS.md   instrukcja do wklejenia modelowi
+.claude/skills/cmdbridge/   skill dla Claude Code (obsługa mostu + build Androida)
 tests/               testy (unittest, bez zależności)
 ```
+
+### Skill dla Claude
+
+W `.claude/skills/cmdbridge/` leży skill uczący Claude'a obsługi mostu:
+`SKILL.md` (zasady doboru widoku i pętla pracy), `references/android.md`
+(przepływ budowania APK i katalog typowych błędów Gradle/Kotlin/AAPT wraz
+z naprawami) oraz `references/api.md` (pełne API). Claude Code w tym repozytorium
+załaduje go automatycznie; w innych środowiskach można go skopiować do
+`~/.claude/skills/`.
 
 ### Jak to działa w środku
 
@@ -159,4 +216,5 @@ jako niespójna i wymaga `restart`.
 python -m unittest discover -s tests -t .
 ```
 
-63 testy: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka bezpieczeństwa, API HTTP, tryb plikowy.
+113 testów: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka
+bezpieczeństwa, silnik widoków, ekstraktory błędów, API HTTP i tryb plikowy.

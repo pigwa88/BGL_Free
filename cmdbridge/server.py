@@ -166,6 +166,11 @@ class BridgeHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_json(status, payload)
             return
 
+        if path == "/logs":
+            status, payload = self.bridge.logs(body)
+            self._send_json(status, payload)
+            return
+
         match = SESSION_ROUTE.match(path)
         if match:
             name, action = match.group(1), match.group(2)
