@@ -20,6 +20,7 @@ from .policy import Policy, parse_rule_file
 from .server import BridgeServer
 from .session import DEFAULT_TIMEOUT, SessionManager
 from .shell import available_shells, resolve_shell
+from .tunnel import RelayTunnel
 
 INSTRUCTIONS_FILE = find_instructions()
 
@@ -51,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Włącza tryb plikowy (katalog wymiany; domyślnie <state-dir>/mailbox)")
     parser.add_argument("--no-server", action="store_true",
                         help="Nie uruchamiaj API HTTP (tylko tryb plikowy)")
+    parser.add_argument("--relay", metavar="URL",
+                        help="Podłącz się do publicznego relaya pod tym adresem "
+                             "(np. https://twoja-domena) - daje AI zdalny dostęp przez link")
+    parser.add_argument("--relay-token", metavar="TOKEN",
+                        help="Token łącza relaya (connect-token wypisany przez cmdbridge.relay)")
+    parser.add_argument("--relay-jobs", type=int, default=4,
+                        help="Ile poleceń z relaya wykonywać równolegle")
     parser.add_argument("--allow-dangerous", action="store_true",
                         help="Wyłącza blokadę poleceń niszczących")
     parser.add_argument("--disable-rule", action="append", default=[],
@@ -93,7 +101,8 @@ def _copy_instructions(state_dir: Path) -> Optional[Path]:
 
 
 def _banner(server: Optional[BridgeServer], mailbox: Optional[Mailbox],
-            token: Optional[str], state_dir: Path, instructions: Optional[Path]) -> None:
+            token: Optional[str], state_dir: Path, instructions: Optional[Path],
+            relay_url: Optional[str] = None) -> None:
     print("=" * 66)
     print(f" CMD Bridge {__version__} - pośrednik CMD <-> AI")
     print("=" * 66)
@@ -104,19 +113,25 @@ def _banner(server: Optional[BridgeServer], mailbox: Optional[Mailbox],
         print(f" Tryb plikowy : {mailbox.root}")
         print(f"   żądania    : {mailbox.inbox}")
         print(f"   odpowiedzi : {mailbox.outbox}")
+    if relay_url:
+        print(f" Relay (zdaln): {relay_url}  <- AI łączy się przez link relaya")
     print(f" Katalog stanu: {state_dir}")
     if instructions:
         print(f" Instrukcja AI: {instructions}")
     print("-" * 66)
-    print(" Skopiuj poniższą linię do czatu z AI:")
-    if server:
-        print(f'   Masz dostęp do CMD przez most HTTP: {server.url} '
-              f'(nagłówek X-Bridge-Token: {token or "brak"}). '
-              f'Instrukcja: GET {server.url}/instructions')
-    elif mailbox:
-        print(f"   Masz dostęp do CMD: zapisuj żądania JSON w {mailbox.inbox}, "
-              f"odpowiedzi czytaj z {mailbox.outbox}. "
-              f"Instrukcja: {instructions}")
+    if relay_url:
+        print(" Zdalny dostęp przez relay aktywny. Link z tokenem dostępu dla AI")
+        print(f" wypisuje serwer relaya. Tunel łączy się z: {relay_url}")
+    else:
+        print(" Skopiuj poniższą linię do czatu z AI:")
+        if server:
+            print(f'   Masz dostęp do CMD przez most HTTP: {server.url} '
+                  f'(nagłówek X-Bridge-Token: {token or "brak"}). '
+                  f'Instrukcja: GET {server.url}/instructions')
+        elif mailbox:
+            print(f"   Masz dostęp do CMD: zapisuj żądania JSON w {mailbox.inbox}, "
+                  f"odpowiedzi czytaj z {mailbox.outbox}. "
+                  f"Instrukcja: {instructions}")
     print("-" * 66)
     print(" Ctrl+C kończy pracę mostu.")
     print("=" * 66, flush=True)
@@ -189,8 +204,26 @@ def main(argv: Optional[list] = None) -> int:
         mailbox = Mailbox(bridge, mailbox_dir)
         mailbox.start()
 
-    if not server and not mailbox:
-        print("Nic do uruchomienia: --no-server wymaga --mailbox", file=sys.stderr)
+    tunnel: Optional[RelayTunnel] = None
+    if args.relay:
+        if not args.relay_token:
+            print("--relay wymaga --relay-token (token łącza z serwera relaya)",
+                  file=sys.stderr)
+            if server:
+                server.stop()
+            if mailbox:
+                mailbox.stop()
+            manager.shutdown()
+            return 2
+        tunnel = RelayTunnel(
+            bridge, args.relay, args.relay_token,
+            max_concurrency=args.relay_jobs, verbose=args.verbose,
+        )
+        tunnel.start()
+
+    if not server and not mailbox and not tunnel:
+        print("Nic do uruchomienia: --no-server wymaga --mailbox lub --relay",
+              file=sys.stderr)
         manager.shutdown()
         return 2
 
@@ -204,11 +237,13 @@ def main(argv: Optional[list] = None) -> int:
             "shell": spec.name,
             "cwd": manager.default_cwd,
             "mailbox": str(mailbox.root) if mailbox else None,
+            "relay": args.relay if tunnel else None,
             "instructions": str(instructions_path) if instructions_path else None,
         },
     )
 
-    _banner(server, mailbox, token, state_dir, instructions_path)
+    _banner(server, mailbox, token, state_dir, instructions_path,
+            relay_url=args.relay if tunnel else None)
 
     stop = threading.Event()
 
@@ -226,6 +261,8 @@ def main(argv: Optional[list] = None) -> int:
             stop.wait(0.5)
     finally:
         print("\n[cmdbridge] Zamykanie...", flush=True)
+        if tunnel:
+            tunnel.stop()
         if mailbox:
             mailbox.stop()
         if server:

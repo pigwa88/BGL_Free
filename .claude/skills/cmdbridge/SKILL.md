@@ -1,6 +1,6 @@
 ---
 name: cmdbridge
-description: Praca przez CMD Bridge - lokalny most, przez który wykonujesz polecenia w CMD/PowerShell/bash na komputerze użytkownika i czytasz wyniki bez wciągania całych logów do kontekstu. Użyj zawsze, gdy pojawia się CMD Bridge, plik ~/.cmdbridge/bridge.json, katalog mailbox z inbox/outbox, albo gdy użytkownik prosi o uruchomienie poleceń na swoim PC, kompilację projektu, build APK/aplikacji na Androida (gradlew, sdkmanager, adb, flutter), diagnozę błędu kompilacji lub analizę wielkiego logu buildu. Zawiera zasady doboru widoku (auto/errors/grep/around) zamiast czytania całego logu oraz gotowy przepływ pracy dla Androida.
+description: Praca przez CMD Bridge - most, przez który wykonujesz polecenia w CMD/PowerShell/bash na komputerze użytkownika i czytasz wyniki bez wciągania całych logów do kontekstu. Użyj zawsze, gdy pojawia się CMD Bridge, plik ~/.cmdbridge/bridge.json, katalog mailbox z inbox/outbox, publiczny link do relaya z tokenem dostępu (zdalny dostęp do CMD przez /api/run), albo gdy użytkownik prosi o uruchomienie poleceń na swoim PC, kompilację projektu, build APK/aplikacji na Androida (gradlew, sdkmanager, adb, flutter), diagnozę błędu kompilacji lub analizę wielkiego logu buildu. Zawiera zasady doboru widoku (auto/errors/grep/around) zamiast czytania całego logu, przepływ pracy dla Androida oraz zdalny dostęp przez relay.
 ---
 
 # CMD Bridge
@@ -26,12 +26,19 @@ Adres i token są w pliku `bridge.json` w katalogu stanu mostu
 
 Kanały, którymi możesz rozmawiać z mostem — użyj tego, który masz pod ręką:
 
-1. **HTTP** — `POST` z nagłówkiem `X-Bridge-Token: <token>`. Preferowany.
-2. **Katalog wymiany (mailbox)** — gdy potrafisz tylko czytać i zapisywać pliki:
+1. **HTTP lokalnie** — `POST` z nagłówkiem `X-Bridge-Token: <token>`, adres
+   `127.0.0.1`. Preferowany, gdy działasz na tym samym komputerze co most.
+2. **Relay (zdalny link z tokenem)** — gdy działasz poza komputerem użytkownika
+   (chmura, przeglądarka). Użytkownik daje ci publiczny adres i **token
+   dostępu**; wołasz `POST /api/run` na relayu. Endpointy i pola są takie same
+   jak lokalnie, tylko z prefiksem `/api/` i polem `op`. Szczegóły:
+   `references/relay.md`. Najpierw sprawdź `GET /api/status` — `worker_online`
+   mówi, czy PC jest podłączony.
+3. **Katalog wymiany (mailbox)** — gdy potrafisz tylko czytać i zapisywać pliki:
    zapisz żądanie jako `<mailbox>/inbox/<nazwa>.json`, odpowiedź pojawi się pod
    tą samą nazwą w `<mailbox>/outbox/`. Format identyczny jak w HTTP, plus pole
    `"op"` (`run`, `logs`, `restart`, ...).
-3. **Przez użytkownika** — jeśli nie masz żadnego z powyższych, podaj gotowy JSON
+4. **Przez użytkownika** — jeśli nie masz żadnego z powyższych, podaj gotowy JSON
    i poproś o wklejenie odpowiedzi. Zanim to zrobisz, sprawdź `GET /health` —
    często okazuje się, że kanał jednak działa.
 
@@ -165,5 +172,8 @@ zadanie tego nie wymaga. Trzymaj się katalogu projektu.
   pierwszy build, katalog typowych błędów (Kotlin, AAPT2, manifest merger,
   duplicate class, OOM, brak SDK) wraz z naprawami, instalacja APK przez adb.
   Przeczytaj, zanim zaczniesz cokolwiek budować na Androida.
+- **Zdalny dostęp (relay)** — `references/relay.md`: publiczny link z tokenem,
+  API `/api/run` i `/api/result`, sprawdzanie `worker_online`. Przeczytaj, gdy
+  działasz poza komputerem użytkownika i dostałeś link zamiast `127.0.0.1`.
 - **Pełne API** — `references/api.md`: wszystkie endpointy, parametry widoków,
   format trybu plikowego, pola odpowiedzi.

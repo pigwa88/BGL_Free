@@ -111,6 +111,64 @@ POST /logs
 {"session": "build", "view": "grep", "pattern": "Caused by", "context": 3}
 ```
 
+## Zdalny dostęp przez relay (publiczny link z tokenem)
+
+Domyślnie most słucha tylko na `127.0.0.1` — dosięgniesz go z tego samego
+komputera. Gdy model AI działa **poza** twoim PC (chmura, przeglądarka, inny
+host), użyj **relaya**: publicznego serwera-przekaźnika, do którego PC łączy się
+**wychodząco** (bez przekierowań portów i otwierania firewalla).
+
+```
+  AI (zdalnie)  ──►  RELAY (publiczny, HTTPS)  ◄──  TUNEL (twój PC) ──► CMD Bridge
+     link + token dostępu           token łącza (prywatny)        polityka + sesje
+```
+
+Relay **niczego nie wykonuje** — tylko kolejkuje żądania i wyniki. Całe
+wykonanie i cała blokada poleceń zostają po stronie PC, więc bezpieczeństwo
+działa tak samo jak lokalnie.
+
+Rozdzielone są dwa tokeny: **token dostępu** (trafia do linku dla AI) oraz
+**token łącza** (prywatny, trzyma go PC).
+
+**1. Na publicznym serwerze** (najlepiej za HTTPS/reverse-proxy) uruchom relay:
+
+```bat
+python -m cmdbridge.relay --host 0.0.0.0 --port 9000 --public-url https://twoja-domena
+```
+
+Wypisze token dostępu, token łącza i gotowy link.
+
+**2. Na swoim PC** (obok mostu) podłącz tunel:
+
+```bat
+python -m cmdbridge --relay https://twoja-domena --relay-token <TOKEN_ŁĄCZA>
+```
+
+**3. Modelowi AI** podaj link do konsoli (strona z AJAX i auto-odświeżaniem
+podglądu sesji na żywo):
+
+```
+https://twoja-domena/?token=<TOKEN_DOSTĘPU>
+```
+
+albo — dla modelu odpytującego API — bazowy adres i token dostępu. Endpointy są
+takie same jak w moście lokalnym, tylko z prefiksem `/api/` i polem `op`:
+
+```json
+POST /api/run?wait=60      nagłówek  X-Bridge-Token: <TOKEN_DOSTĘPU>
+{"op": "run", "command": "gradlew.bat assembleDebug --console=plain",
+ "session": "build", "timeout": 1800, "view": "auto"}
+```
+
+Kod 200 = wynik gotowy; 202 z `{"pending": true, "id": ...}` = jeszcze trwa,
+odpytuj `GET /api/result?id=<id>&wait=25`. Podgląd stanu: `GET /api/status`
+(`worker_online` mówi, czy PC jest podłączony). Szczegóły w
+`.claude/skills/cmdbridge/references/relay.md`.
+
+> **Uwaga.** Relay wystawia wykonywanie poleceń na twoim PC do internetu.
+> Traktuj token dostępu jak hasło do zdalnego pulpitu, postaw relay za HTTPS,
+> a most uruchamiaj na koncie bez uprawnień administratora (i rozważ `--confirm`).
+
 ## API HTTP (skrót)
 
 | Metoda i ścieżka | Opis |
@@ -184,10 +242,13 @@ cmdbridge/
   extractors.py rozpoznawanie błędów: Gradle, Kotlin, javac, AAPT2, Python, npm, MSBuild
   shell.py      definicje powłok (cmd.exe, PowerShell, sh/bash)
   procutil.py   drzewo procesów potomnych (przerywanie bez zabijania powłoki)
+  relay.py      publiczny przekaźnik + strona konsoli (AJAX) dla zdalnego AI
+  tunnel.py     klient tunelu: PC łączy się wychodząco z relayem
   policy.py     reguły bezpieczeństwa
   audit.py      dziennik JSONL
   client.py     klient CLI
 AI_INSTRUCTIONS.md   instrukcja do wklejenia modelowi
+run_relay.bat        uruchomienie publicznego relaya na Windows
 .claude/skills/cmdbridge/   skill dla Claude Code (obsługa mostu + build Androida)
 tests/               testy (unittest, bez zależności)
 ```
@@ -197,7 +258,8 @@ tests/               testy (unittest, bez zależności)
 W `.claude/skills/cmdbridge/` leży skill uczący Claude'a obsługi mostu:
 `SKILL.md` (zasady doboru widoku i pętla pracy), `references/android.md`
 (przepływ budowania APK i katalog typowych błędów Gradle/Kotlin/AAPT wraz
-z naprawami) oraz `references/api.md` (pełne API). Claude Code w tym repozytorium
+z naprawami), `references/relay.md` (zdalny dostęp przez publiczny link)
+oraz `references/api.md` (pełne API). Claude Code w tym repozytorium
 załaduje go automatycznie; w innych środowiskach można go skopiować do
 `~/.claude/skills/`.
 
@@ -216,5 +278,6 @@ jako niespójna i wymaga `restart`.
 python -m unittest discover -s tests -t .
 ```
 
-113 testów: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka
-bezpieczeństwa, silnik widoków, ekstraktory błędów, API HTTP i tryb plikowy.
+137 testów: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka
+bezpieczeństwa, silnik widoków, ekstraktory błędów, API HTTP, tryb plikowy
+oraz relay z tunelem (kolejki, dwa tokeny, pełny łańcuch AI↔relay↔PC).

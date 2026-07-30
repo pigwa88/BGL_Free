@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmdbridge"
-version = "1.0.0"
+version = "1.1.0"
 description = "Pośrednik między wierszem poleceń (CMD) a modelem AI bez bezpośredniego dostępu do powłoki"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -23,6 +23,7 @@ dependencies = []
 [project.scripts]
 cmdbridge = "cmdbridge.app:main"
 cmdbridge-client = "cmdbridge.client:main"
+cmdbridge-relay = "cmdbridge.relay:main"
 
 [tool.setuptools]
 packages = ["cmdbridge"]

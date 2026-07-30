@@ -110,6 +110,27 @@ startu.
 
 Pole `hint` w odpowiedzi zawsze mówi, co zrobić dalej.
 
+## Zdalny dostęp przez relay (gdy dostałeś link zamiast 127.0.0.1)
+
+Gdy działasz poza komputerem użytkownika, most bywa wystawiony przez publiczny
+**relay**. Dostajesz wtedy bazowy adres i **token dostępu** (albo od razu link
+`https://domena/?token=...`). API jest takie samo jak wyżej, tylko z prefiksem
+`/api/` i polem `op`:
+
+```http
+POST /api/run?wait=60      nagłówek  X-Bridge-Token: <TOKEN_DOSTĘPU>
+{"op": "run", "command": "gradlew.bat assembleDebug", "session": "build",
+ "timeout": 1800, "view": "auto"}
+```
+
+- Kod 200 = wynik gotowy (zwykła odpowiedź mostu z `exit_code`, `output`, ...).
+- Kod 202 z `{"pending": true, "id": "..."}` = jeszcze trwa; odpytuj w pętli
+  `GET /api/result?id=<id>&wait=25`, aż dostaniesz 200 (204 = wciąż w toku).
+- `GET /api/status` mówi, czy PC jest podłączony (`worker_online`).
+
+Relay tylko przekazuje żądania — wszystkie blokady bezpieczeństwa działają dalej
+po stronie PC (kod 403 wraca tak samo). Traktuj token dostępu jak hasło.
+
 ## Tryb plikowy (gdy nie możesz wysyłać HTTP)
 
 Zapisz żądanie jako plik `<mailbox>/inbox/<nazwa>.json`:
