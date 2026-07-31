@@ -212,6 +212,70 @@ class RelayHTTPTestCase(unittest.TestCase):
         self.assertTrue(data["pending"])
 
 
+# ------------------------------------------- CORS (strona na innym hoście)
+
+class CorsTestCase(unittest.TestCase):
+    """Samodzielna strona (web/console.html) bywa hostowana na innej domenie."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.hub = RelayHub()
+        cls.server = RelayServer(cls.hub, "127.0.0.1", 0, ACCESS, CONNECT,
+                                 allow_origin="https://moja-strona.pl")
+        cls.server.start()
+        cls.url = cls.server.url
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.stop()
+
+    @staticmethod
+    def _headers_of(url, path, method="GET", extra=None):
+        req = urllib.request.Request(url + path, method=method)
+        for k, v in (extra or {}).items():
+            req.add_header(k, v)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(req, timeout=10) as response:
+                return response.status, dict(response.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, dict(exc.headers)
+
+    def test_preflight_allows_token_header(self) -> None:
+        status, headers = self._headers_of(
+            self.url, "/api/submit", "OPTIONS",
+            {"Origin": "https://moja-strona.pl", "Access-Control-Request-Method": "POST"},
+        )
+        self.assertEqual(status, 204)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://moja-strona.pl")
+        self.assertIn("X-Bridge-Token", headers.get("Access-Control-Allow-Headers", ""))
+
+    def test_normal_response_carries_cors(self) -> None:
+        status, headers = self._headers_of(self.url, "/api/status", "GET",
+                                           {"X-Bridge-Token": ACCESS})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://moja-strona.pl")
+        self.assertEqual(headers.get("Vary"), "Origin")
+
+    def test_error_response_carries_cors(self) -> None:
+        # Bez CORS na 401 przeglądarka nie pokaże powodu odmowy.
+        status, headers = self._headers_of(self.url, "/api/status", "GET",
+                                           {"X-Bridge-Token": "zly"})
+        self.assertEqual(status, 401)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://moja-strona.pl")
+
+    def test_wildcard_default_has_no_vary(self) -> None:
+        hub = RelayHub()
+        server = RelayServer(hub, "127.0.0.1", 0, ACCESS, CONNECT)
+        server.start()
+        try:
+            status, headers = self._headers_of(server.url, "/health")
+            self.assertEqual(headers.get("Access-Control-Allow-Origin"), "*")
+            self.assertIsNone(headers.get("Vary"))
+        finally:
+            server.stop()
+
+
 # --------------------------------------------------- pełny łańcuch z tunelem/PC
 
 class TunnelEndToEndTestCase(unittest.TestCase):

@@ -17,12 +17,16 @@ więc blokady poleceń działają tak samo jak lokalnie.
 
 Jedną z dwóch rzeczy (albo obie):
 
-1. **Link do konsoli**: `https://domena/?token=<ACCESS>` — strona z AJAX,
-   auto-odświeżaniem i podglądem sesji na żywo (dla człowieka lub agenta z
-   przeglądarką).
+1. **Link do konsoli** — strona z AJAX, auto-odświeżaniem i podglądem sesji na
+   żywo (dla człowieka lub agenta z przeglądarką). Bywa pod adresem relaya
+   (`https://domena/?token=<ACCESS>`) albo na własnej stronie użytkownika
+   (`https://strona/console.html?relay=https://domena&token=<ACCESS>`).
 2. **Bazowy adres + token dostępu** do API — i tego użyj jako agent HTTP.
    Endpointy i pola są **takie same jak w lokalnym moście**, zmienia się tylko
    adres bazowy i to, że autoryzujesz się tokenem dostępu relaya.
+
+Gdy dostaniesz link do strony na cudzej domenie, adres API bierz z parametru
+`relay=` w tym linku — to on wskazuje relay, a nie adres samej strony.
 
 ## API relaya (strona agenta)
 

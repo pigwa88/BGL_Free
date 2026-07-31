@@ -172,11 +172,33 @@ class RelayHandler(BaseHTTPRequestHandler):
     def connect_token(self) -> Optional[str]:
         return self.server.connect_token  # type: ignore[attr-defined]
 
+    @property
+    def allow_origin(self) -> str:
+        return getattr(self.server, "allow_origin", "*")
+
     def log_message(self, fmt: str, *args) -> None:  # pragma: no cover - cisza
         if getattr(self.server, "verbose", False):
             super().log_message(fmt, *args)
 
     # --------------------------------------------------------- niskopoziomowe
+
+    def _send_cors(self) -> None:
+        """Pozwala wołać API ze strony hostowanej na innej domenie.
+
+        Autoryzacja opiera się na tokenie w nagłówku, a nie na ciasteczkach,
+        więc nie wysyłamy ``Allow-Credentials`` - przeglądarka i tak nie doda
+        tu ciasteczek, a token musi podać jawnie skrypt strony.
+        """
+        origin = self.allow_origin
+        if not origin:
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, X-Bridge-Token, X-Worker-Token, Authorization")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Max-Age", "86400")
+        if origin != "*":
+            self.send_header("Vary", "Origin")
 
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -184,6 +206,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._send_cors()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -192,6 +215,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Content-Length", "0")
         self.send_header("Cache-Control", "no-store")
+        self._send_cors()
         self.end_headers()
 
     def _send_html(self, status: int, text: str) -> None:
@@ -200,6 +224,7 @@ class RelayHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._send_cors()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -265,6 +290,13 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         self._guard(self._handle_post)
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """Preflight CORS - przeglądarka pyta o zgodę przed właściwym żądaniem."""
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self._send_cors()
+        self.end_headers()
 
     # ------------------------------------------------------------------ GET
 
@@ -417,13 +449,14 @@ class RelayServer:
 
     def __init__(self, hub: RelayHub, host: str, port: int,
                  access_token: Optional[str], connect_token: Optional[str],
-                 verbose: bool = False) -> None:
+                 verbose: bool = False, allow_origin: str = "*") -> None:
         self.httpd = ThreadingHTTPServer((host, port), RelayHandler)
         self.httpd.daemon_threads = True
         self.httpd.hub = hub                          # type: ignore[attr-defined]
         self.httpd.access_token = access_token        # type: ignore[attr-defined]
         self.httpd.connect_token = connect_token      # type: ignore[attr-defined]
         self.httpd.verbose = verbose                  # type: ignore[attr-defined]
+        self.httpd.allow_origin = allow_origin        # type: ignore[attr-defined]
         self.host, self.port = self.httpd.server_address[:2]
         self._thread: Optional[threading.Thread] = None
 
@@ -699,6 +732,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--connect-token", help="Token łącza (dla PC); domyślnie losowy")
     parser.add_argument("--public-url",
                         help="Publiczny adres (np. https://twoja-domena) do wypisania linku")
+    parser.add_argument("--allow-origin", default="*",
+                        help="CORS: skąd wolno wołać API (np. https://twoja-strona; "
+                             "'*' = zewsząd, pusty = wyłącz CORS)")
     parser.add_argument("--state-dir", default=None, help="Katalog na relay.json")
     parser.add_argument("--job-ttl", type=float, default=DEFAULT_JOB_TTL,
                         help="Po ilu sekundach porzucać nieodebrane zadania/wyniki")
@@ -750,7 +786,8 @@ def main(argv: Optional[list] = None) -> int:
 
     hub = RelayHub(job_ttl=args.job_ttl)
     try:
-        server = RelayServer(hub, args.host, args.port, access, connect, args.verbose)
+        server = RelayServer(hub, args.host, args.port, access, connect, args.verbose,
+                             allow_origin=args.allow_origin)
     except OSError as exc:
         print(f"Nie można otworzyć portu {args.port}: {exc}")
         return 2

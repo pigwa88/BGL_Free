@@ -151,6 +151,11 @@ podglądu sesji na żywo):
 https://twoja-domena/?token=<TOKEN_DOSTĘPU>
 ```
 
+Strona jest **wbudowana w relay** — serwuje ją pod adresem głównym, nie musisz
+niczego wgrywać. Jeśli wolisz mieć wejście **na własnej stronie**, wgraj na swój
+hosting gotowy plik `web/console.html` (jeden plik, bez zależności) i uruchom
+relay z `--allow-origin https://twoja-strona`; szczegóły w `web/README.md`.
+
 albo — dla modelu odpytującego API — bazowy adres i token dostępu. Endpointy są
 takie same jak w moście lokalnym, tylko z prefiksem `/api/` i polem `op`:
 
@@ -248,6 +253,7 @@ cmdbridge/
   audit.py      dziennik JSONL
   client.py     klient CLI
 AI_INSTRUCTIONS.md   instrukcja do wklejenia modelowi
+web/console.html     samodzielna strona-pośrednik do wgrania na własny hosting
 run_relay.bat        uruchomienie publicznego relaya na Windows
 .claude/skills/cmdbridge/   skill dla Claude Code (obsługa mostu + build Androida)
 tests/               testy (unittest, bez zależności)
@@ -278,6 +284,9 @@ jako niespójna i wymaga `restart`.
 python -m unittest discover -s tests -t .
 ```
 
-137 testów: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka
+141 testów: sesje, filtrowanie znaczników, zarządzanie sesjami, polityka
 bezpieczeństwa, silnik widoków, ekstraktory błędów, API HTTP, tryb plikowy
-oraz relay z tunelem (kolejki, dwa tokeny, pełny łańcuch AI↔relay↔PC).
+oraz relay z tunelem (kolejki, dwa tokeny, CORS, pełny łańcuch AI↔relay↔PC).
+Strona `web/console.html` była dodatkowo sprawdzona w przeglądarce (Chromium)
+serwowana z innego origin niż relay — logowanie tokenem, wykonanie polecenia,
+trwałość sesji, blokada polityki i wylogowanie.
